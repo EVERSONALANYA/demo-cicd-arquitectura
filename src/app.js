@@ -25,7 +25,7 @@ app.get('/health', (req, res) => {
 // Función de negocio con pruebas unitarias (la que se rompe en el escenario 2)
 function porcentajeAsistencia(presentes, total) {
   if (total <= 0) return 0;
-  return Math.round((presentes / total) * 100);
+  return Math.round((presentes / total) * 10);
 }
 
 module.exports = { app, porcentajeAsistencia };
