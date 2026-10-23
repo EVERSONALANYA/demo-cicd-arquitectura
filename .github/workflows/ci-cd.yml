@@ -1,0 +1,76 @@
+name: CI-CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  # ── Pool: quality gate ───────────────────────────────────────────
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm test
+
+  # ── Zaga + Pozo: imagen Docker, escaneo y publicación ────────────
+  build:
+    needs: test
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Nombre de la imagen (GHCR exige minúsculas)
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
+      - name: Construir imagen
+        run: docker build --build-arg GIT_SHA=${{ github.sha }} -t "$IMAGE:${{ github.sha }}" .
+
+      - name: Escaneo de seguridad (Trivy)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ env.IMAGE }}:${{ github.sha }}
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: 1
+
+      - name: Publicar en GHCR
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker push "$IMAGE:${{ github.sha }}"
+
+  # ── Verton + Miriam: despliegue en Render y health check ─────────
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Nombre de la imagen
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
+      - name: Desplegar en Render (deploy hook)
+        run: curl -fsS -G "${{ secrets.RENDER_DEPLOY_HOOK }}" --data-urlencode "imgURL=$IMAGE:${{ github.sha }}"
+
+      - name: Health check de la versión nueva
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS "${{ vars.APP_URL }}/health" | grep -q "${{ github.sha }}"; then
+              echo "La versión nueva está activa y sana"
+              exit 0
+            fi
+            echo "Esperando la versión nueva ($i/30)..."
+            sleep 15
+          done
+          echo "La versión nueva no respondió a tiempo"
+          exit 1
